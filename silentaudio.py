@@ -20,14 +20,16 @@ CHANNELS = 2
 DEVICE_NAME = "Philips FTV (NVIDIA High Definition Audio)"
 LOCK_FILE = os.path.join(os.environ.get("TEMP", os.getcwd()), "silentaudio.lock")
 RETRY_INTERVAL = 5
+CALLBACK_TIMEOUT = 10.0  # seconds without a callback tick → assume post-sleep stall
 
 
-def make_callback(error_event: threading.Event):
+def make_callback(error_event: threading.Event, last_tick: list):
     phase = 0.0
     phase_step = 2.0 * np.pi * FREQUENCY_HZ / SAMPLE_RATE
 
     def callback(outdata, frames, time_info, status):
         nonlocal phase
+        last_tick[0] = time.monotonic()
         if status:
             error_event.set()
         n = np.arange(frames, dtype=np.float32)
@@ -110,18 +112,21 @@ def main() -> int:
             device = wait_for_device()
             try:
                 error_event = threading.Event()
+                last_tick = [time.monotonic()]
                 with sd.OutputStream(
                     device=device,
                     samplerate=SAMPLE_RATE,
                     blocksize=BLOCK_SIZE,
                     channels=CHANNELS,
                     dtype="float32",
-                    callback=make_callback(error_event),
+                    callback=make_callback(error_event, last_tick),
                 ) as stream:
                     notified_wrong_device = False
                     while stream.active and not error_event.is_set():
                         if find_device() == -1:
                             break
+                        if time.monotonic() - last_tick[0] > CALLBACK_TIMEOUT:
+                            break  # callback stalled (e.g. after hibernate/sleep)
                         stream_device_name = sd.query_devices(stream.device)["name"]
                         if DEVICE_NAME not in stream_device_name and not notified_wrong_device:
                             toast("silentaudio misconfigured", "Audio is not playing on the expected Philips TV device.")
